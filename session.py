@@ -33,11 +33,13 @@ class Video:
     video_length: float
     room_id: int
     video_resolution: str
+    video_resolution_x: int
+    video_resolution_y: int
     video_length_flv: float
 
     def __init__(self, file_closed_event_json):
         flv_name = file_closed_event_json['EventData']['RelativePath']
-        self.base_path = flv_name.rpartition('.')[0]
+        self.base_path = os.path.abspath(flv_name.rpartition('.')[0])
         self.session_id = file_closed_event_json["EventData"]["SessionId"]
         self.room_id = file_closed_event_json["EventData"]["RoomId"]
         self.video_length = file_closed_event_json["EventData"]["Duration"]
@@ -64,6 +66,8 @@ class Video:
         )
         self.video_length_flv = float(video_length_str[0].decode('utf-8').strip())
         self.video_resolution = str(video_resolution_str[0].decode('utf-8').strip())
+        video_resolutions = self.video_resolution.split("x")
+        self.video_resolution_x, self.video_resolution_y = int(video_resolutions[0]), int(video_resolutions[1])
 
 
 class Session:
@@ -161,7 +165,7 @@ class Session:
             self.he_time = float(he_time_str)
 
     def generate_concat(self):
-        concat_text = "\n".join([f"file '{os.path.basename(video.flv_file_path())}'" for video in self.videos])
+        concat_text = "\n".join([f"file '{video.flv_file_path()}'" for video in self.videos])
         with open(self.output_path()['concat_file'], 'w') as concat_file:
             concat_file.write(concat_text)
 
@@ -183,13 +187,29 @@ class Session:
                 self.output_path()['video_log']
             )
 
+    def get_resolution(self):
+        video_res_sorted = list(reversed([
+            (video.video_resolution_x / video.video_resolution_y,
+             video.video_resolution_x,
+             video.video_resolution_y)
+            for video in self.videos
+        ]))  # prioritize wider, higher-res format
+        video_res_x = video_res_sorted[0][1]
+        video_res_y = video_res_sorted[0][2]
+        return video_res_x, video_res_y
+
     async def process_danmaku(self):
+        video_res_x, video_res_y = self.get_resolution()
+        font_size = max(video_res_x, video_res_y) * 50 // 1920
+        print(f"font_size: {font_size}")
         danmaku_conversion_command = \
             f"{BINARY_PATH}DanmakuFactory/DanmakuFactory " \
+            f"-x {video_res_x} " \
+            f"-y {video_res_y} " \
             f"--ignore-warnings " \
             f"-o \"{self.output_path()['ass']}\" " \
             f"-i \"{self.output_path()['xml']}\" " \
-            f"--fontname \"Noto Sans CJK SC\" -S 50 " \
+            f"--fontname \"Noto Sans CJK SC\" -S {font_size} -O 255 " \
             f">> \"{self.output_path()['extras_log']}\" 2>&1"
         await async_wait_output(danmaku_conversion_command)
 
@@ -219,6 +239,7 @@ class Session:
         video_bitrate = (max_size / total_time - audio_bitrate) - 500  # just to be safe
         max_video_bitrate = float(8000)  # BiliBili now re-encode every video anyways
         video_bitrate = int(min(max_video_bitrate, video_bitrate))
+        video_res_x, video_res_y = self.get_resolution()
         ffmpeg_command = f'''ffmpeg -y -loop 1 -t {total_time} \
         -i "{self.output_path()['he_graph']}" \
         -f concat \
@@ -226,7 +247,8 @@ class Session:
         -i "{self.output_path()['concat_file']}" \
         -t {total_time} \
         -filter_complex "
-        [0:v][1:v]scale2ref=iw:iw*(main_h/main_w)[color][ref];
+        [1:v]scale={video_res_x}:{video_res_y}:force_original_aspect_ratio=decrease,pad={video_res_x}:{video_res_y}:-1:-1:color=black[v_fixed];
+        [0:v][v_fixed]scale2ref=iw:iw*(main_h/main_w)[color][ref];
         [color]split[color1][color2];
         [color1]hue=s=0[gray];
         [color2]negate=negate_alpha=1[color_neg];
@@ -265,48 +287,28 @@ class Session:
             return
         await self.process_video()
 
-#
-# if __name__ == '__main__':
-#     BINARY_PATH = "../exes/"
-#     session_json = {'EventType': 'SessionStarted', 'EventTimestamp': '2021-04-09T22:50:15.301987-07:00',
-#                     'EventId': '6379acb5-0dfd-465e-bb03-58d9867e7591',
-#                     'EventData': {'SessionId': 'e3807981-3104-402a-ad71-8d42023c787d', 'RoomId': 1016219, 'ShortId': 0,
-#                                   'Name': '隐染啊', 'Title': '不要自闭挑战', 'AreaNameParent': '娱乐', 'AreaNameChild': '户外'}}
-#     video_json_list = [
-#         {'EventType': 'FileClosed', 'EventTimestamp': '2021-04-09T23:44:37.128312-07:00',
-#          'EventId': '114c0b8d-80a3-4d2e-81f5-9d1ba17f4acd',
-#          'EventData': {'RelativePath': '1016219-隐染啊/录制-1016219-20210409-234332-不要自闭挑战.flv', 'FileSize': 8488458,
-#                        'Duration': 63.646, 'FileOpenTime': '2021-04-09T23:43:32.456413-07:00',
-#                        'FileCloseTime': '2021-04-09T23:44:37.128288-07:00',
-#                        'SessionId': '22fa4a41-6e75-4ed6-8352-2a2449eeb252', 'RoomId': 1016219, 'ShortId': 0,
-#                        'Name': '隐染啊', 'Title': '不要自闭挑战', 'AreaNameParent': '娱乐', 'AreaNameChild': '户外'}},
-#         {'EventType': 'FileClosed', 'EventTimestamp': '2021-04-09T23:45:43.996789-07:00',
-#          'EventId': 'ff29a876-06c6-4007-8f4a-25da210ab043',
-#          'EventData': {'RelativePath': '1016219-隐染啊/录制-1016219-20210409-234437-不要自闭挑战.flv', 'FileSize': 8528472,
-#                        'Duration': 66.796, 'FileOpenTime': '2021-04-09T23:44:37.128482-07:00',
-#                        'FileCloseTime': '2021-04-09T23:45:43.996718-07:00',
-#                        'SessionId': '22fa4a41-6e75-4ed6-8352-2a2449eeb252', 'RoomId': 1016219, 'ShortId': 0,
-#                        'Name': '隐染啊', 'Title': '不要自闭挑战', 'AreaNameParent': '娱乐', 'AreaNameChild': '户外'}},
-#         {'EventType': 'FileClosed', 'EventTimestamp': '2021-04-09T23:46:50.169678-07:00',
-#          'EventId': '89d52da7-4cf4-46eb-84e3-be050c21f5f8',
-#          'EventData': {'RelativePath': '1016219-隐染啊/录制-1016219-20210409-234543-不要自闭挑战.flv', 'FileSize': 8665668,
-#                        'Duration': 66.923, 'FileOpenTime': '2021-04-09T23:45:43.997006-07:00',
-#                        'FileCloseTime': '2021-04-09T23:46:50.16964-07:00',
-#                        'SessionId': '22fa4a41-6e75-4ed6-8352-2a2449eeb252', 'RoomId': 1016219, 'ShortId': 0,
-#                        'Name': '隐染啊', 'Title': '不要自闭挑战', 'AreaNameParent': '娱乐', 'AreaNameChild': '户外'}},
-#         {'EventType': 'FileClosed', 'EventTimestamp': '2021-04-09T23:46:55.203116-07:00',
-#          'EventId': '39e1aff4-7d3d-45ec-a228-492244677353',
-#          'EventData': {'RelativePath': '1016219-隐染啊/录制-1016219-20210409-234650-不要自闭挑战.flv', 'FileSize': 993789,
-#                        'Duration': 7.463, 'FileOpenTime': '2021-04-09T23:46:50.16998-07:00',
-#                        'FileCloseTime': '2021-04-09T23:46:55.2031-07:00',
-#                        'SessionId': '22fa4a41-6e75-4ed6-8352-2a2449eeb252', 'RoomId': 1016219, 'ShortId': 0,
-#                        'Name': '隐染啊', 'Title': '不要自闭挑战', 'AreaNameParent': '娱乐', 'AreaNameChild': '户外'}}
-#     ]
-#     session = Session(session_json)
-#     video_tasks = []
-#     for video_json in video_json_list:
-#         video = Video(video_json)
-#         asyncio.run(session.add_video(video))
-#
-#     asyncio.run(session.gen_early_video())
-#     asyncio.run(session.gen_danmaku_video())
+
+if __name__ == '__main__':
+    BINARY_PATH = "../exes/"
+    session_json = {'EventType': 'SessionStarted', 'EventTimestamp': '2021-04-09T22:50:15.301987-07:00',
+                    'EventId': '6379acb5-0dfd-465e-bb03-58d9867e7591',
+                    'EventData': {'SessionId': 'e3807981-3104-402a-ad71-8d42023c787d', 'RoomId': 128308, 'ShortId': 0,
+                                  'Name': '隐染啊', 'Title': '不要自闭挑战', 'AreaNameParent': '娱乐', 'AreaNameChild': '户外'}}
+    filenames = ["128308-20210530-014105.flv", "128308-20210530-020536.flv", "128308-20210530-032330.flv"]
+    video_json_list = [
+        {'EventType': 'FileClosed', 'EventTimestamp': '2021-04-09T23:44:37.128312-07:00',
+         'EventId': '114c0b8d-80a3-4d2e-81f5-9d1ba17f4acd',
+         'EventData': {'RelativePath': f'128308/{filename}', 'FileSize': 128308,
+                       'Duration': 63.646, 'FileOpenTime': '2021-04-09T23:43:32.456413-07:00',
+                       'FileCloseTime': '2021-04-09T23:44:37.128288-07:00',
+                       'SessionId': '22fa4a41-6e75-4ed6-8352-2a2449eeb252', 'RoomId': 128308, 'ShortId': 0,
+                       'Name': '隐染啊', 'Title': '不要自闭挑战', 'AreaNameParent': '娱乐', 'AreaNameChild': '户外'}} for filename in filenames
+    ]
+    session = Session(session_json)
+    video_tasks = []
+    for video_json in video_json_list:
+        video = Video(video_json)
+        asyncio.run(session.add_video(video))
+
+    asyncio.run(session.gen_early_video())
+    asyncio.run(session.gen_danmaku_video())
